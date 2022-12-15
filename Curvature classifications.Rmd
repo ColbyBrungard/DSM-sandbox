@@ -1,0 +1,199 @@
+---
+title: "Curvature Classes"
+author: "cbrungard"
+date: "6/5/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+Surface morphometry, specifically slope shape, is useful for soil survey, but it is not immediatley obvious how to create slope shape classes from a DEM. Inspired by Fred Young's ideas presented in the soil gemorphic institute and a need to create slope shape classes. This tutorial is intended to provide an overview of how to create the three 'down slope', the three 'across slope', and the nine curvature classes useful for soil survey. A brief description and pictorial representation of these classes is provided on pg 3-40 of the "Field Book for Sampling and Describing soils" (citation). 
+
+How to put in picture? 
+
+
+Both SAGA GIS (link) and GRASS GIS (link) can be used to create the basic curvatures. The SAGA code is demonstrated here. Although these are relativley fast calculations, it maybe that GRASS GIS is faster for really large (in size or resolution) rasters, but no speed comparision has been done. From the spotty documentation, it seems like both saga and grass implement the same algorithm using a "multi-scale approach by fitting quadratic parameters to any size window via least squares". 
+
+The basic steps of this process are: 
+0. Convert DEM to saga-gis .sdat format
+1. Create downslope (i.e. profile), and across slope (i.e., plan) curvature
+2. Classify profile curvature into three classes: Concave, Linear, Convex
+3. Classify plan curvature into three classes: Concave, Linear, Convex
+4. Reclassify the three profile and plan curvature classes into the nine curvature classes
+5. Convert everything back to geotif (this just makes it easier). 
+
+
+All of the following can be done in the saga-gis GUI, but I will document how to do this on the command line here: 
+
+0. rem convert to saga format
+gdalwarp -t_srs EPSG:26912 -of SAGA test.tif test.sdat
+
+where -t_srs is the projection (can be epsg or proj.4 format), -of is output format (should be SAGA to produce the right format); test.tif is the input DEM in geotif format, and test.sdat is the oputput. I have found that it is necessary to include the -t_srs projection definition, even if not reprojecting, to force the resulting output to have the right projection. 
+
+
+
+1. Create curvatures. Downslope curvature is synonomys with profile curvature. Across slope curvature is synonomys with plan curvature. 
+
+There are two SAGA modules that can create curvatures (and slope and aspect, etc.). The first is the "Morphometric Features Module" (http://www.saga-gis.org/saga_tool_doc/7.6.3/ta_morphometry_23.html). This is the module I think is optimal because it allows you to define the size of the window. The other modual, "slope, aspect, curvature" (http://www.saga-gis.org/saga_tool_doc/2.2.3/ta_morphometry_0.html) lacks the choice of a moving window size, but does allow other algorithms to be used. Positive values describe convex profile curvature, negative values concave profiles, and values close to zero indicate 'planar' areas. 
+
+One of the options that affects the curvature values is the size of the moving window over which the curvature is calculated. Loop through several possible window sizes since I don't know know apriori the optimal window size. These are given as the number of cells. This took about 20 min on a 2.6 GHz processor (saga is mostly processor, not memory, bound). 
+
+set wsize= 3 5 7 9 11 15 19 31
+
+for %%i in (%wsize%) do ( 
+saga_cmd ta_morphometry 23 -DEM=test.sgrd -PROFC=test_profc_%%i.sgrd -PLANC=test_planc_%%i.sgrd -SIZE=%%i -TOL_SLOPE=1.00 -TOL_CURVE=0.0001
+)
+
+where -DEM = input elevation (needs to be .sgrd not .sdat), -profc = profile curvature, -planc = plan curvature, size = window size, -tol_slope = slope tolerance that defines a 'flat' surface (degrees), and -tol_curve = curvature tolerance that defines 'planar' surface. There are a few other options, but these were not investigated. I suspect, though cannot prove, that the slope and curvature tolerances are used for the morphometric features (which is an optional output from this modual that tries to classify landforms) and which ikely do not influence the curvature values themselves.  
+
+Based on a visual review I chose to use a windowsize of 7 cells as this seemed to provide a good trade off between caputuring relevant curvature patterns and masking noise (but see below for quantitative ideas on choosing optimal parameters). A windowsize of 7 seemed optimal for both profile and plan curvature (doesn't need to be that way). Also, I was working with a 10-m DEM that had large interpolation 'terrance' artifacts in the flat areas and this windowize helped remove these. I found that using a diverging color scheme with the class cutoffs of (-0.005, -0.004, -0.003, -0.002, -0.001, 0, 0.001, 0.002, 0.003, 0.004, 0.005) was helpuful. I also found that overlaying plan curvature on topolines, more so than imagery, was particularly helpful for visulizing curvature patterns.  
+
+
+2. Create curvature classifications
+Use the 'reclassification' saga grid tool  to 'bin' these curvatures into concave, planar, and convex. This depends on a look up table with relevant values defining the bins. The table should be a tab delimited text file and look like the following: 
+minimum	maximum	new
+-1000.0000	-0.008	1.0000
+-0.008	0.008	2.0000
+0.008	1000.0000	3.0000
+
+'Minimum' column = minimum values that will be reclassified into the value in the 'new' column. 'Maximum' column = maximum values that will be reclassified into the value in the 'new' column. 'New' column, the resulting values from the reclassification. Selecting these values should be done by someone familiar with the area. I found that a visual review of the actual values over base imagery helped me to select the appropriate min and max values where it seemed like the curvature changed (but again, see below for an idea to find quantitative values). One note, curvature often ranges between -1 and 1, however; there are some cells which have very large (positive and negative values). Setting the smalled minimum and the largest maximum to be large values (-1000 and 1000 in this case) just makes sure that all the pixels are classified. 
+
+Please be aware however; that it seems that plan curvature values are opposite in sign than profile curvatures. Meaning that plan curvature values that are convex are negative, and positive plan curvature values are concave. The easiest way to account for this is to simply adjust the values in the 'new' column so they decend in size:  
+minimum	maximum	new
+-100000.0000	-0.0001	3.0000
+-0.0001	0.0001	2.0000
+0.0001	100000.0000	1.0000
+
+What values should I use for cutoff thresholds? As Stephen (and several other authors in other publications) points out in his "Scale Effects on Terrain Attribute Calculation" the neighborhood size should fundamentally depend on the underlying landforms (particularly true for curvatures). 
+Additionally; when binning continuous variables to categorical variables the choice of cutoff should be carefully considered. One quantitative way to do this would be to overlay pedons that have known slope shapes on the curvature values. It should then be possible to extract curvature values at each point, and plot each of the three curvature classes to investigate for an inflection point at which curvature values most clearly seperate curvature classes. 
+```{r}
+library(sf)
+library(raster)
+library(ggplot2)
+
+# Tabular file with curvature classes and spatial locations
+cclasses <- read.csv("D:/Rio Puerco/TomCochran/RPpedons/allrawPedons.csv")
+# remove columns for easier reading
+cc <- cclasses[, c(1,3,4,39,40)]
+
+# Make spatial. Longitude has to come first
+cc2 <- st_as_sf(cc, coords = c("Std.Longitude", "Std.Latitude"), crs = "+proj=longlat +ellps=GRS80 +datum=NAD83 +no_defs ")
+
+# Reproject to match rasters
+#26912 is the epsg code of the rasters. crs = '+proj=utm +zone=12 +ellps=GRS80 +datum=NAD83 +units=m +no_defs' 
+cc3 <- st_transform(cc2, 26912)
+
+# Plan and profile rasters
+plancurve <- raster("D:/Rio Puerco/TomCochran/Curvatures/RPplan.tif")
+profcurve <- raster("D:/Rio Puerco/TomCochran/Curvatures/RPprof.tif")
+
+# exctract raster values
+plan <- raster::extract(plancurve, cc3)
+prof <- raster::extract(profcurve, cc3)
+
+# join and filter for NA values
+ppcurve <- cbind(cc, plan, prof)
+ppcurve <- ppcurve[complete.cases(ppcurve), ]
+
+
+# Profile curvature
+# concave. Should be only negative (my point data is messy)
+summary(ppcurve[ppcurve$Slope.Shape.Up.Down=='concave'& ppcurve$prof <0, 'prof'])
+# convex. Should be only positive (my point data is messy)
+summary(ppcurve[ppcurve$Slope.Shape.Up.Down=='convex'& ppcurve$prof >0, 'prof'])
+#linear
+summary(ppcurve[ppcurve$Slope.Shape.Up.Down=='linear', 'prof'])
+
+# density plot
+ggplot(ppcurve, aes(x = prof, color = Slope.Shape.Up.Down)) + geom_density()
+
+# boxplot
+ggplot(ppcurve, aes(x = Slope.Shape.Up.Down, y = prof)) + geom_boxplot() + ylim(-1,1)
+
+# Taking the mean of the above values is -1.058 for concave profile curvatrure and 1.0423 as convex. 
+
+# Plan curvature
+# concave
+summary(ppcurve[ppcurve$Slope.Shape.Across=='concave' & ppcurve$plan <0, 'plan'])
+# convex
+summary(ppcurve[ppcurve$Slope.Shape.Across=='convex'& ppcurve$plan >0, 'plan'])
+#linear
+summary(ppcurve[ppcurve$Slope.Shape.Across=='linear', 'plan'])
+
+# density plot
+ggplot(ppcurve, aes(x = prof, color = Slope.Shape.Across)) + geom_density()
+
+# boxplot
+ggplot(ppcurve, aes(x = Slope.Shape.Across, y = prof)) + geom_boxplot() + ylim(-1,1)
+
+# Taking the mean of the above values is -0.6 for concave profile curvatrure and 0.88795 as convex.
+
+```
+
+
+
+Cuvature classes 
+
+profile curvature classes
+
+saga_cmd grid_tools 15 -INPUT=test_profc_7.sgrd -RESULT=test_profc_7_classes.sgrd -METHOD=2 -RETAB=lut_profc.txt -TOPERATOR=3
+
+plan curvature classes
+
+saga_cmd grid_tools 15 -INPUT=test_planc_7.sgrd -RESULT=test_planc_7_classes.sgrd -METHOD=2 -RETAB=lut_planc.txt -TOPERATOR=3
+
+where -Input is the profile or plan curvature, -result is the classes -retab is the tab delimited text file, and -method and -tooperator tell the program to look for the text file. 
+
+
+3. nine curvature classes
+Use the Combine Grids module to join these into the 9 classes.  
+
+saga_cmd grid_tools 20 -GRID1=RPrawNED10m_profc3c.sgrd -GRID2=RPrawNED10m_planc3c.sgrd -RESULT=RPrawNED10m_9cc.sgrd -LOOKUP=lut_9classes.txt
+
+where; -grid1 is the profile curvature classes (slope shape categories are defined as down slope first, then across slope second), -grid2 is the plan curvature classes, -result is the result, and -lookup is a tab delimited text file lookup table that defines the following: 
+Value in Grid 1	Value in Grid 2	Resulting Value
+2.000000	2.000000	1.000000
+2.000000	3.000000	2.000000
+2.000000	1.000000	3.000000
+3.000000	2.000000	4.000000
+3.000000	3.000000	5.000000
+3.000000	1.000000	6.000000
+1.000000	2.000000	7.000000
+1.000000	3.000000	8.000000
+1.000000	1.000000	9.000000
+
+
+Resulting numerical values can then be mapped to classes: 
+1 = Linear-Linear 
+2 = linear - Convex
+3 = Linear - Concave
+4 = Convex - Linear
+5 = Convex - Convex
+6 = Convex - Concave
+7 = Concave - Linear
+8 = Concave - Convex
+9 = Concave - Concave
+
+To get extra fancy you could also assign a color scheme to the .tif files so that they automatically get a color scheme that everyone will see
+
+
+gdaldem color-relief -of GTiff RPplan_classes.tif color.txt RPplan_classes2.tif  
+gdaldem color-relief -of GTiff RPprof_classes.tif color.txt RPprof_classes2.tif 
+
+Where the first tif is your input file, the second tif is the output file and the .txt file is a file that lists the class followed by the RGB colors. For example, for 3 classes this would look like: 
+
+1. 175 141 195
+2. 247 247 247
+3. 127 191 123
+
+
+...
+
+
+
+
+
